@@ -1,0 +1,37 @@
+Leafvain v0.2.0 — Office Skill + SKILL.md 标准兼容
+====================================================
+
+## 日期
+2026-07-02
+
+## 核心交付
+全格式文档解析（Word/PPT/Excel）+ SKILL.md 标准 + JSON Schema 2020-12 对齐。
+
+## 新增/变更
+
+### Skill 层
+- 新增 skills/office_parser/
+  - handler.py: parse_docx (python-docx 逐段流式 + 表格), parse_pptx (python-pptx 逐页), parse_xlsx (openpyxl read_only 逐行)
+  - manifest.yaml: JSON Schema 2020-12 声明
+  - SKILL.md: agentskills.io YAML frontmatter 标准
+- skills/file_parser/SKILL.md: 补充 SKILL.md
+
+### 总线层 (bus/)
+- bus/loaders/skill_loader.py: 支持双文件解析（manifest.yaml + SKILL.md），校验 name/description/命名规范
+
+### 核心层 (core/)
+- core/agent_loop.py: dispatch 从 2 种 parse 扩展到 5 种（pdf/txt/docx/pptx/xlsx）
+- auto_parse: 新增 .docx/.pptx/.xlsx 扩展名识别
+
+### 标准 & 文档
+- MCP_ADAPTATION.md: 后续对接社区的三方案 + 时间线
+- 所有 manifest.yaml 的 inputSchema 补 $schema 声明
+
+## 工具全景 (7 tools)
+- parse_pdf / parse_txt / search_chunks / summarize_document (file_parser)
+- parse_docx / parse_pptx / parse_xlsx (office_parser)
+
+## 已验证场景
+- Word (.docx) 流式解析 + 总结
+- PowerPoint (.pptx) 文本提取 + 总结
+- Excel (.xlsx) 流式读取 + 搜索

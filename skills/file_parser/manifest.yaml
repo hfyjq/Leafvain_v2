@@ -1,0 +1,69 @@
+kind: skill
+name: file_parser
+version: "0.1.0"
+description: "Parse PDF and TXT files with streaming chunking. Search and summarize chunked content."
+
+tools:
+  - name: parse_pdf
+    description: >
+      Stream-parse a PDF file page by page, chunk each page's text
+      (max 1500 chars per chunk), and index all chunks for retrieval.
+      Returns metadata only — use search_chunks to query content.
+    inputSchema:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      type: object
+      properties:
+        file_path:
+          type: string
+          description: "Path to the PDF file. If relative, resolved under data/workspaces/"
+      required: ["file_path"]
+
+  - name: parse_txt
+    description: >
+      Stream-parse a TXT file line by line, chunk the content
+      (max 1500 chars per chunk), and index all chunks for retrieval.
+      Returns metadata only — use search_chunks to query content.
+    inputSchema:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      type: object
+      properties:
+        file_path:
+          type: string
+          description: "Path to the TXT file. If relative, resolved under data/workspaces/"
+        encoding:
+          type: string
+          description: "File encoding (default: utf-8)"
+          default: "utf-8"
+      required: ["file_path"]
+
+  - name: search_chunks
+    description: >
+      Search indexed document chunks using BM25 keyword relevance.
+      Returns the top-3 most relevant chunks with page and position metadata.
+      If file_path is provided and no document is currently loaded, the file
+      will be auto-parsed first (parse_pdf or parse_txt depending on extension).
+    inputSchema:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      type: object
+      properties:
+        query:
+          type: string
+          description: "Search query in Chinese or English"
+        file_path:
+          type: string
+          description: "Optional: path to file to search. If provided and no document is loaded, auto-parses the file first."
+
+  - name: summarize_document
+    description: >
+      Generate a comprehensive document summary using iterative chunk
+      aggregation. Processes chunks in rounds, merging summaries
+      until one final summary remains. Never processes full text at once.
+      If file_path is provided and no document is currently loaded, the file
+      will be auto-parsed first (parse_pdf or parse_txt depending on extension).
+    inputSchema:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      type: object
+      properties:
+        file_path:
+          type: string
+          description: "Optional: path to file to summarize. If provided and no document is loaded, auto-parses first."

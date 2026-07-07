@@ -1,0 +1,50 @@
+kind: skill
+name: office_parser
+version: "0.1.0"
+description: "Parse Microsoft Office documents — Word, PowerPoint, Excel — with streaming extraction and chunking."
+
+tools:
+  - name: parse_docx
+    description: >
+      Stream-parse a Word (.docx) file paragraph by paragraph, extract tables,
+      and chunk the content. Returns metadata only — use search_chunks to
+      query specific content or summarize_document for a full summary.
+    inputSchema:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      type: object
+      properties:
+        file_path:
+          type: string
+          description: "Path to the .docx file. If relative, resolved under data/workspaces/"
+      required: ["file_path"]
+
+  - name: parse_pptx
+    description: >
+      Extract text from a PowerPoint (.pptx) file slide by slide.
+      Each slide is treated as one page. Text from all shapes (titles,
+      text boxes, tables) is collected and chunked.
+    inputSchema:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      type: object
+      properties:
+        file_path:
+          type: string
+          description: "Path to the .pptx file. If relative, resolved under data/workspaces/"
+      required: ["file_path"]
+
+  - name: parse_xlsx
+    description: >
+      Stream-read an Excel (.xlsx) spreadsheet using openpyxl read_only mode.
+      Rows are read one at a time via iter_rows(), accumulated into pages
+      (100 rows each), and chunked. Supports optional sheet name selection.
+    inputSchema:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      type: object
+      properties:
+        file_path:
+          type: string
+          description: "Path to the .xlsx file. If relative, resolved under data/workspaces/"
+        sheet_name:
+          type: string
+          description: "Optional: specific sheet name to read. Defaults to the active sheet."
+      required: ["file_path"]

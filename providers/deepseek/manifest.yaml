@@ -1,0 +1,9 @@
+kind: provider
+name: deepseek
+version: "0.1.0"
+description: "DeepSeek API provider using OpenAI-compatible SDK"
+config:
+  base_url: <BASE_URL>
+  default_model: <DEFAULT_MODEL>
+  supports_function_calling: true
+  supports_streaming: true
