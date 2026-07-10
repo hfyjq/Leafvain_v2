@@ -1,24 +1,25 @@
 """
 Load a provider from its manifest.yaml, instantiate its client,
-and register it in the global registry.
+validate it implements BaseProvider, and register it.
 """
 
 import importlib
-import os
 from pathlib import Path
 
 import yaml
 
 from bus.registry import register_provider
+from providers.base import BaseProvider
 
 
 def load_provider(provider_dir: Path, config: dict) -> None:
     """
     1. Read <provider_dir>/manifest.yaml.
     2. Validate kind == "provider".
-    3. Dynamically import the client module.
-    4. Instantiate the client with config values.
-    5. Register via register_provider(name, instance).
+    3. Dynamically import the client module, find the *Provider class.
+    4. Instantiate with config values (falling back to manifest defaults).
+    5. Validate it's a BaseProvider instance.
+    6. Register via register_provider(name, instance).
     """
     manifest_path = provider_dir / "manifest.yaml"
     if not manifest_path.exists():
@@ -29,35 +30,57 @@ def load_provider(provider_dir: Path, config: dict) -> None:
 
     if manifest.get("kind") != "provider":
         raise ValueError(
-            f"Expected kind='provider' in {manifest_path}, got '{manifest.get('kind')}'"
+            f"Expected kind='provider' in {manifest_path}, "
+            f"got '{manifest.get('kind')}'"
         )
 
     name = manifest["name"]
+    manifest_cfg = manifest.get("config", {})
+
+    # --- Import the provider class ---
     module_name = f"providers.{provider_dir.name}.client"
     module = importlib.import_module(module_name)
 
-    # Find the client class by convention: <Name>Client or DeepSeekClient
-    client_class = None
+    # Find the *Provider class (by convention)
+    provider_class = None
     for attr_name in dir(module):
-        if attr_name.endswith("Client") and not attr_name.startswith("_"):
-            client_class = getattr(module, attr_name)
-            break
+        if attr_name.endswith("Provider") and not attr_name.startswith("_"):
+            candidate = getattr(module, attr_name)
+            if isinstance(candidate, type) and issubclass(candidate, BaseProvider):
+                provider_class = candidate
+                break
 
-    if client_class is None:
+    if provider_class is None:
         raise AttributeError(
-            f"No *Client class found in {module_name}"
+            f"No BaseProvider subclass found in {module_name}. "
+            f"Expected a class named *Provider that inherits from BaseProvider."
         )
 
-    # Extract model config from the global config
+    # --- Merge config: manifest defaults < config.yaml overrides ---
     model_cfg = config.get("model", {})
 
-    client_instance = client_class(
+    provider_instance = provider_class(
         api_key=model_cfg.get("api_key", ""),
-        base_url=model_cfg.get("base_url", "<BASE_URL>"),
-        model=model_cfg.get("model_name", "<MODEL_NAME>"),
+        base_url=model_cfg.get("base_url", manifest_cfg.get("base_url", "")),
+        model=model_cfg.get("model_name", manifest_cfg.get("default_model", "")),
         temperature=model_cfg.get("temperature", 0.3),
         max_tokens=model_cfg.get("max_tokens", 4096),
+        context_window=model_cfg.get(
+            "context_window",
+            manifest_cfg.get("context_window", 65536),
+        ),
     )
 
-    register_provider(name, client_instance)
-    print(f"[bus] Provider loaded: {name}")
+    # Safety check
+    if not isinstance(provider_instance, BaseProvider):
+        raise TypeError(
+            f"Provider '{name}' ({provider_class.__name__}) "
+            f"does not implement BaseProvider."
+        )
+
+    register_provider(name, provider_instance)
+    print(
+        f"[bus] Provider loaded: {name} "
+        f"(model={provider_instance._model}, "
+        f"window={provider_instance.context_window})"
+    )

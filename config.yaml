@@ -5,6 +5,7 @@ model:
   base_url: <BASE_URL>
   temperature: <TEMPERATURE>
   max_tokens: <MAX_TOKENS>
+  context_window: <CONTEXT_WINDOW>
 
 security:
   allowed_directories:
@@ -25,3 +26,16 @@ retrieval:
 summarization:
   chunk_summary_max_chars: 200
   merge_batch_size: 3
+
+memory:
+  enabled: true
+  storage_path: ./data/memory
+  short_term:
+    max_messages: 500
+  compression:
+    token_threshold: 0.85
+    keep_recent_turns: 3
+  long_term:
+    chroma_path: ./data/memory/chroma
+  semantic:
+    db_path: ./data/memory/profile.db

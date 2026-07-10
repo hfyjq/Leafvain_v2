@@ -4,12 +4,11 @@ Leafvain v2 — Entry point.
 Responsibilities (and ONLY these):
   1. Load configuration.
   2. Initialize the module bus (providers, skills, channels).
-  3. Get the active provider and channel.
-  4. Start the interactive loop.
+  3. Initialize the memory manager.
+  4. Get the active provider and channel.
+  5. Start the interactive loop.
 """
 
-from dotenv import load_dotenv
-load_dotenv()
 import asyncio
 import sys
 from pathlib import Path
@@ -26,6 +25,7 @@ load_dotenv()
 
 from bus.core import init_bus, load_config
 from bus.registry import get_provider, get_channel
+from core.memory.manager import MemoryManager
 
 
 async def main() -> None:
@@ -39,10 +39,17 @@ async def main() -> None:
     provider_name = config.get("model", {}).get("provider", "deepseek")
     provider = get_provider(provider_name)
 
-    # 4. Get the CLI channel and start
+    # 4. Initialize memory manager
+    memory_manager = None
+    if config.get("memory", {}).get("enabled", True):
+        memory_manager = MemoryManager(config, provider)
+        print(f"[memory] MemoryManager initialized "
+              f"(path={config.get('memory', {}).get('storage_path', 'data/memory')})")
+
+    # 5. Get the CLI channel and start
     channel_name = config.get("channel", {}).get("default", "cli_channel")
     channel_run = get_channel(channel_name)
-    await channel_run(provider)
+    await channel_run(provider, memory_manager=memory_manager)
 
 
 if __name__ == "__main__":
