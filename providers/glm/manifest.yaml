@@ -1,10 +1,10 @@
 kind: provider
-name: deepseek
-version: "0.2.0"
-description: "DeepSeek API provider using OpenAI-compatible SDK"
+name: glm
+version: "0.1.0"
+description: "智谱 GLM API provider using OpenAI-compatible SDK"
 config:
   base_url: <BASE_URL>
   default_model: <DEFAULT_MODEL>
-  context_window: 65536
+  context_window: 131072
   supports_function_calling: true
   supports_streaming: true

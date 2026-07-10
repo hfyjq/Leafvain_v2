@@ -129,7 +129,7 @@ def _summarize_single(
         },
     ]
     response = client.chat(messages)
-    return (response.get("content") or "").strip()
+    return (response.content or "").strip()
 
 
 def _merge_summaries(
@@ -151,4 +151,4 @@ def _merge_summaries(
         {"role": "user", "content": combined},
     ]
     response = client.chat(messages)
-    return (response.get("content") or "").strip()
+    return (response.content or "").strip()

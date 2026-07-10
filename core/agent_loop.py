@@ -40,8 +40,8 @@ SYSTEM_PROMPT = """You are a document analysis assistant. You can parse document
 # Return type for agent_loop — carries state across turns
 # ------------------------------------------------------------------
 
-SessionState = Tuple[str, List[Dict], List[Dict]]
-# (response_text, updated_messages, updated_session_chunks)
+SessionState = Tuple[str, List[Dict], List[Dict], int]
+# (response_text, updated_messages, updated_session_chunks, tokens_used)
 
 
 def agent_loop(
@@ -49,6 +49,7 @@ def agent_loop(
     provider,  # Provider client with .chat(messages, tools) method
     messages: List[Dict] | None = None,
     session_chunks: List[Dict] | None = None,
+    memory_context: str = "",
     max_turns: int = 15,
 ) -> SessionState:
     """
@@ -62,7 +63,7 @@ def agent_loop(
         max_turns: Safety limit to prevent infinite tool-calling loops.
 
     Returns:
-        (response_text, updated_messages, updated_session_chunks)
+        (response_text, updated_messages, updated_session_chunks, tokens_used)
     """
     # ------------------------------------------------------------------
     # Per-session state (IN-MEMORY, never in LLM context)
@@ -73,12 +74,17 @@ def agent_loop(
     if session_chunks:
         retriever.index(session_chunks)
 
+    tokens_used = 0
+
     # ------------------------------------------------------------------
     # Build / extend messages
     # ------------------------------------------------------------------
     if messages is None:
+        system_content = SYSTEM_PROMPT
+        if memory_context:
+            system_content += f"\n\n{memory_context}"
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_content},
         ]
     messages.append({"role": "user", "content": user_message})
 
@@ -89,16 +95,17 @@ def agent_loop(
     # ------------------------------------------------------------------
     for turn in range(max_turns):
         response = provider.chat(messages, tools)
+        tokens_used += response.total_tokens
 
         # Terminal: model returned a text response (no tool calls)
-        content = response.get("content")
-        tool_calls = response.get("tool_calls")
+        content = response.content
+        tool_calls = response.tool_calls
 
         if content and not tool_calls:
-            return (content, messages, session_chunks)
+            return (content, messages, session_chunks, tokens_used)
 
         if not tool_calls:
-            return ("(no response from model)", messages, session_chunks)
+            return ("(no response from model)", messages, session_chunks, tokens_used)
 
         # Append assistant message (with tool_calls) to history
         messages.append({
@@ -226,6 +233,7 @@ def agent_loop(
         "(reached maximum tool-calling turns — please rephrase your request)",
         messages,
         session_chunks,
+        tokens_used,
     )
 
 
