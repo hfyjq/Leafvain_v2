@@ -9,31 +9,15 @@ Key invariants (the four hard constraints):
 """
 
 import json
+import os
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 from bus.registry import get_tool_handler, get_tool_schemas
+from core.prompt_assembler import assemble_system_prompt
 from core.retriever import BM25Retriever
 from core.summarizer import iterative_summarize
-
-
-SYSTEM_PROMPT = """You are a document analysis assistant. You can parse documents, search their contents, and generate summaries.
-
-## Available tools
-- **parse_pdf / parse_txt**: Parse a file and index its contents.
-- **search_chunks**: Search indexed content with keywords. You can pass a file_path to auto-parse first.
-- **summarize_document**: Generate a full summary. You can pass a file_path to auto-parse first.
-
-## IMPORTANT RULES
-1. When the user mentions a file, call parse_pdf (for .pdf) or parse_txt (for .txt) to load it first.
-   - If the user gives a bare filename like "te1.txt", try both: the path as-is, and "data/workspaces/te1.txt".
-   - If the user says "总结这个文件" or "search for X in this file" and you already have a file loaded,
-     use search_chunks or summarize_document WITHOUT file_path — it will use the already-parsed content.
-2. For summaries, you can pass file_path directly to summarize_document to auto-parse + summarize in one step.
-3. For searching, you can pass file_path + query to search_chunks to auto-parse + search in one step.
-4. NEVER ask to see the full document text — always use search_chunks.
-5. Answer in the same language as the user's question.
-6. When you're done, give the final answer directly — do not call more tools unless the user asks a follow-up."""
 
 
 # ------------------------------------------------------------------
@@ -51,6 +35,7 @@ def agent_loop(
     session_chunks: List[Dict] | None = None,
     memory_context: str = "",
     max_turns: int = 15,
+    tool_result_max_chars: int = 2000,
 ) -> SessionState:
     """
     Process one user message with tool-calling support.
@@ -79,13 +64,69 @@ def agent_loop(
     # ------------------------------------------------------------------
     # Build / extend messages
     # ------------------------------------------------------------------
-    if messages is None:
-        system_content = SYSTEM_PROMPT
-        if memory_context:
-            system_content += f"\n\n{memory_context}"
+    if messages is None or len(messages) == 0:
+        system_content = assemble_system_prompt(memory_context)
         messages = [
             {"role": "system", "content": system_content},
         ]
+        print(f"[agent] Created system prompt"
+              + (f" with memory context ({len(memory_context)} chars)"
+                 if memory_context else " (no memory yet)"))
+
+    # Inject / refresh memory context in the system message.
+    # Previous memory sections are stripped before the new one is
+    # appended — otherwise the system message balloons with
+    # duplicated profile data across turns.
+    if memory_context:
+        injected = False
+        for i, m in enumerate(messages):
+            if m.get("role") == "system":
+                existing = m.get("content", "")
+
+                # Strip any previously-injected memory sections so
+                # they don't accumulate across turns.  We identify
+                # them by the section headers we use in manager.py.
+                for header in (
+                    "## USER PROFILE (internal",
+                    "## RELEVANT CONTEXT (internal",
+                    "## SESSION STATE (internal",
+                    "## YOUR MEMORY — User Profile",
+                    "## YOUR MEMORY — Relevant Past Conversations",
+                    "## YOUR MEMORY — Current Session",
+                ):
+                    idx = existing.find(header)
+                    if idx != -1:
+                        existing = existing[:idx].rstrip()
+
+                if memory_context not in existing:
+                    messages[i] = {
+                        "role": "system",
+                        "content": existing + f"\n\n{memory_context}",
+                    }
+                    print(f"[agent] Injected memory context "
+                          f"({len(memory_context)} chars)")
+                injected = True
+                break
+        if not injected:
+            messages.insert(0, {
+                "role": "system",
+                "content": assemble_system_prompt(memory_context),
+            })
+            print(f"[agent] Prepended system prompt with memory context "
+                  f"({len(memory_context)} chars)")
+
+    # On non-first turns, insert a brief system-level nudge so the
+    # model treats this as a continuous conversation — not a new one.
+    # Flash / small models in particular tend to ignore long system
+    # prompts but respond well to short, positionally-primed nudges
+    # right before the user message.
+    has_prior_user = any(m.get("role") == "user" for m in messages)
+    if has_prior_user:
+        messages.append({
+            "role": "system",
+            "content": "[This is a continuous conversation. Reply directly — no greetings, no recaps.]",
+        })
+
     messages.append({"role": "user", "content": user_message})
 
     tools = get_tool_schemas()
@@ -221,6 +262,12 @@ def agent_loop(
             except Exception as e:
                 tool_result_content = f"Tool execution error: {type(e).__name__}: {e}"
 
+            # Apply output budget: offload oversized results to disk
+            tool_result_content = _format_tool_result(
+                tool_result_content, tool_name,
+                max_chars=tool_result_max_chars,
+            )
+
             # Append tool result message
             messages.append({
                 "role": "tool",
@@ -279,6 +326,62 @@ def _auto_parse(file_path: str, provider) -> List[Dict]:
     else:
         # Unknown extension — try txt
         return parse_txt(resolved)
+
+
+# ------------------------------------------------------------------
+# Tool result offloading (L1 — persistent output to disk)
+# ------------------------------------------------------------------
+
+_TOOL_RESULTS_DIR = Path("data/workspaces/tool_results")
+
+
+def _resolve_tool_output_dir() -> Path:
+    """Ensure the tool-results output directory exists and return its path."""
+    _TOOL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    return _TOOL_RESULTS_DIR
+
+
+def _format_tool_result(
+    content: str,
+    tool_name: str,
+    max_chars: int = 2000,
+) -> str:
+    """Apply output budget to a tool result.
+
+    When *content* exceeds *max_chars* the full text is written to
+    ``data/workspaces/tool_results/<ts>_<tool>.txt`` and a truncated
+    preview + ``<persistent_output>`` tag is returned instead.
+
+    Args:
+        content: The raw tool result string.
+        tool_name: Name of the tool that produced this result.
+        max_chars: Threshold in characters.  0 disables offloading.
+
+    Returns:
+        Either the original *content* (if under threshold) or a
+        preview string with a ``<persistent_output>`` pointer.
+    """
+    if max_chars <= 0 or len(content) <= max_chars:
+        return content
+
+    # Build a timestamped output file name
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = _resolve_tool_output_dir()
+    safe_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in tool_name)
+    out_path = out_dir / f"{ts}_{safe_name}.txt"
+
+    out_path.write_text(content, encoding="utf-8")
+
+    preview = content[:max_chars]
+    truncated = len(content) - max_chars
+
+    return (
+        f"{preview}\n\n"
+        f"... [truncated: {truncated:,} more chars]\n\n"
+        f"<persistent_output file=\"{out_path}\">\n"
+        f"Full output ({len(content):,} chars) written to disk.\n"
+        f"</persistent_output>"
+    )
 
 
 def _format_chunks(chunks: List[Dict]) -> str:

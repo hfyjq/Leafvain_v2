@@ -124,9 +124,12 @@ class FactExtractor:
             fact_text = fact.get("fact", "")
             confidence = fact.get("confidence", 1.0)
 
-            # For preference/constraint/decision categories, also
-            # write to the semantic profile as KV pairs
-            if category in ("preference", "constraint", "decision", "personal"):
+            # Sync ALL categories to semantic profile (KV store)
+            # so get_context() can always find them regardless of category
+            if category in (
+                "preference", "constraint", "decision",
+                "personal", "project", "knowledge", "relationship",
+            ):
                 # Derive a key from the first ~40 chars of the fact
                 key = _fact_to_key(fact_text)
                 self._semantic.upsert(

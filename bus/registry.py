@@ -38,6 +38,39 @@ def get_tool_schemas() -> list[dict]:
     return _registry["tool_schemas"]
 
 
+def get_tool_summaries() -> list[str]:
+    """Return name: one-line-description strings for each tool.
+
+    Used by the prompt assembler to generate the <available_tools>
+    section — the model sees tool names and short descriptions in
+    the system prompt, while full JSON Schemas are sent via the
+    ``tools`` parameter of the chat API.
+    """
+    summaries: list[str] = []
+    for tool_def in _registry["tool_schemas"]:
+        name = tool_def["function"]["name"]
+        desc = tool_def["function"].get("description", "")
+        # Collapse multi-line descriptions into a single line
+        one_liner = " ".join(desc.split())
+        summaries.append(f"{name}: {one_liner}")
+    return summaries
+
+
+def get_tool_schemas_filtered(names: list[str] | None = None) -> list[dict]:
+    """Return tool schemas, optionally filtered to the given names.
+
+    When *names* is None, behaves identically to :func:`get_tool_schemas`.
+    When a list of names is provided, only schemas matching those names
+    are returned (future lazy-load path).
+    """
+    if names is None:
+        return _registry["tool_schemas"]
+    return [
+        td for td in _registry["tool_schemas"]
+        if td["function"]["name"] in names
+    ]
+
+
 def get_tool_handler(name: str) -> Callable | None:
     """Return the handler callable for a given tool name, or None."""
     return _registry["tools"].get(name)

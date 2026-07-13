@@ -53,6 +53,13 @@ class ShortTermMemory:
         self._conn.commit()
         return session_id
 
+    def get_last_session_id(self) -> str | None:
+        """Return the most recently updated session_id, or None."""
+        row = self._conn.execute(
+            "SELECT session_id FROM sessions ORDER BY updated_at DESC LIMIT 1"
+        ).fetchone()
+        return row[0] if row else None
+
     # ------------------------------------------------------------------
     # Message CRUD
     # ------------------------------------------------------------------
@@ -66,14 +73,19 @@ class ShortTermMemory:
         """Persist a single message to the database."""
         role = message.get("role", "")
         content = message.get("content") or ""
-        tool_calls = None
-        if message.get("tool_calls"):
-            tool_calls = json.dumps(message["tool_calls"], ensure_ascii=False)
+
+        # Store ALL non-standard fields in extra_json so we never
+        # lose tool_call_id, tool_calls, name, etc.
+        extra = {
+            k: v for k, v in message.items()
+            if k not in ("role", "content")
+        }
+        extra_json = json.dumps(extra, ensure_ascii=False) if extra else None
 
         self._conn.execute(
-            "INSERT INTO messages (session_id, role, content, tool_calls, "
+            "INSERT INTO messages (session_id, role, content, extra_json, "
             "token_count, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, role, content, tool_calls, token_count, _now()),
+            (session_id, role, content, extra_json, token_count, _now()),
         )
         self._conn.commit()
 
@@ -98,16 +110,20 @@ class ShortTermMemory:
         Returns an empty list if the session does not exist.
         """
         rows = self._conn.execute(
-            "SELECT role, content, tool_calls FROM messages "
+            "SELECT role, content, extra_json FROM messages "
             "WHERE session_id = ? ORDER BY id ASC",
             (session_id,),
         ).fetchall()
 
         messages: List[Dict] = []
-        for role, content, tool_calls_json in rows:
+        for role, content, extra_json in rows:
             msg: Dict = {"role": role, "content": content}
-            if tool_calls_json:
-                msg["tool_calls"] = json.loads(tool_calls_json)
+            if extra_json:
+                try:
+                    extra = json.loads(extra_json)
+                    msg.update(extra)
+                except json.JSONDecodeError:
+                    pass
             messages.append(msg)
         return messages
 
@@ -144,7 +160,7 @@ class ShortTermMemory:
                 session_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT,
-                tool_calls TEXT,
+                extra_json TEXT,
                 token_count INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)

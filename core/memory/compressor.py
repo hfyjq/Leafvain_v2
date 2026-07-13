@@ -13,16 +13,45 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 
-# Prompt for compressing old conversation history
-COMPRESSION_PROMPT = """You are a conversation summarizer. Summarize the following conversation history concisely.
+# Prompt for compressing old conversation history into a structured,
+# multi-section summary.  The LLM fills each section with relevant
+# details; sections with nothing to report should contain "(none)".
+COMPRESSION_PROMPT = """You are a conversation summarizer. Summarize the following conversation history into 9 structured sections using Markdown.
 
-Focus on:
-1. Key topics discussed
-2. Decisions made
-3. Important facts shared by the user
-4. Actions taken or agreed upon
+Output format (use EXACTLY these 9 headings — do NOT add, remove, or reorder sections):
 
-Write a single paragraph summary (max 500 characters). Use the same language as the conversation."""
+## 任务目标
+[The core task or goal of this conversation segment. One or two sentences.]
+
+## 代码变更
+[Files that were created, modified, or discussed. Include file paths when known. If none, write "(none)".]
+
+## 关键决策
+[Important technical or design decisions made, and the reasoning behind them. If none, write "(none)".]
+
+## 问题与解决
+[Problems encountered and how they were resolved. If none, write "(none)".]
+
+## 待办事项
+[Tasks or follow-ups that were identified but not yet completed. If none, write "(none)".]
+
+## 文件列表
+[Files and resources referenced in this conversation. Include paths. If none, write "(none)".]
+
+## 测试状态
+[Test results, coverage notes, or testing discussion. If none, write "(none)".]
+
+## 性能考虑
+[Performance discussions, trade-offs, or optimizations considered. If none, write "(none)".]
+
+## 后续建议
+[Recommendations for future work or next steps. If none, write "(none)".]
+
+Rules:
+- Keep each section concise (1-3 sentences max).
+- Use the same language as the conversation.
+- Empty sections MUST contain "(none)" — never omit a heading.
+- Do NOT add extra commentary outside the 9 sections."""
 
 
 class Compressor:
@@ -42,6 +71,9 @@ class Compressor:
         self._backup_dir = Path(backup_dir)
         self._backup_dir.mkdir(parents=True, exist_ok=True)
 
+        # Stats for the most recent compression (for UI display)
+        self.last_compression: dict | None = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -60,6 +92,7 @@ class Compressor:
         messages: List[Dict],
         provider,  # BaseProvider for LLM compression call
         context_window: int,
+        session_note: str | None = None,
     ) -> Tuple[List[Dict], bool]:
         """
         If the message list exceeds the token threshold, compress the
@@ -70,13 +103,17 @@ class Compressor:
             messages: Current message list.
             provider: LLM provider for generating the summary.
             context_window: Provider's context window size.
+            session_note: Pre-built session note (L3 memory).  When
+                provided, it is injected directly as the summary —
+                no LLM call is made for compression.  Falls back to
+                LLM summarisation when ``None`` or empty.
 
         Returns:
             (compressed_messages, was_compressed)
         """
-        # Estimate total tokens from ChatResponse history is more accurate,
-        # but as a quick pre-check we use the provider's token counter.
-        total = sum(provider.count_tokens(m.get("content") or "") for m in messages)
+        # Use provider's estimate_message_tokens which includes per-message
+        # role overhead (~4 tokens/msg) in addition to content tokens.
+        total = provider.estimate_message_tokens(messages)
 
         if not self.should_compress(total, context_window):
             return messages, False
@@ -94,10 +131,25 @@ class Compressor:
         if not old_messages:
             return messages, False
 
-        # Generate summary via LLM
-        summary = self._summarize(old_messages, provider)
+        # Generate summary — use pre-built session note if available
+        summary = None
+        source = "llm"  # for stats
+
+        if session_note and session_note.strip():
+            summary = session_note.strip()
+            source = "session_note"
+            print(
+                f"[compressor] Using pre-built session note "
+                f"({len(summary)} chars) — zero API cost"
+            )
+
         if not summary:
-            return messages, False  # LLM call failed, skip compression
+            # Fall back to LLM-generated summary
+            summary = self._summarize(old_messages, provider)
+            source = "llm"
+
+        if not summary:
+            return messages, False  # No summary available, skip compression
 
         # Build the compressed message list
         compressed: List[Dict] = []
@@ -112,6 +164,17 @@ class Compressor:
 
         # Backup to disk
         self._save_backup(session_id, summary, old_messages)
+
+        # Record stats for UI display
+        self.last_compression = {
+            "old_turns": len(turn_boundaries),
+            "compressed_turns": len(turn_boundaries) - self._keep_recent,
+            "kept_turns": self._keep_recent,
+            "old_message_count": len(messages),
+            "new_message_count": len(compressed),
+            "summary_chars": len(summary),
+            "source": source,
+        }
 
         return compressed, True
 

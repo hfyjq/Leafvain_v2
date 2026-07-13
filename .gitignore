@@ -37,6 +37,21 @@ data/chroma/
 data/workspaces/*
 !data/workspaces/.gitkeep
 
+# 记忆数据（运行时生成，不进 git）
+data/memory/*.db
+data/memory/*.db-shm
+data/memory/*.db-wal
+data/memory/chroma/
+data/memory/compressed/*
+data/memory/sessions/*
+data/memory/LEAF_memory.md
+!data/memory/.gitkeep
+
+# LEAF 用户项目上下文 — 模板提交，用户自行修改
+data/workspaces/*
+!data/workspaces/.gitkeep
+!data/workspaces/LEAF.md
+
 # 日志（含审计日志，不进 git）
 logs/
 *.log

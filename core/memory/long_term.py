@@ -180,3 +180,24 @@ class LongTermMemory:
 
     def rag_count(self) -> int:
         return self._rag.count()
+
+    def close(self) -> None:
+        """Release ChromaDB resources.
+
+        On Windows, SQLite WAL mode holds file locks until the
+        underlying segment server is stopped.  Without this, the
+        database files cannot be deleted while the process lives.
+        """
+        # 1. Stop the internal segment server (releases SQLite handles)
+        try:
+            if hasattr(self._client, "_system") and self._client._system is not None:
+                self._client._system.stop()
+        except Exception:
+            pass
+
+        # 2. Drop collection references
+        self._facts = None
+        self._rag = None
+
+        # 3. Drop the client reference so GC can clean up
+        self._client = None

@@ -27,6 +27,11 @@ summarization:
   chunk_summary_max_chars: 200
   merge_batch_size: 3
 
+# Tool result offloading: outputs longer than this (in chars) are
+# written to disk; only a preview + <persistent_output> tag stays
+# in the LLM context.  Set to 0 to disable.
+tool_result_max_chars: 2000
+
 memory:
   enabled: true
   storage_path: ./data/memory
@@ -39,3 +44,5 @@ memory:
     chroma_path: ./data/memory/chroma
   semantic:
     db_path: ./data/memory/profile.db
+  session_memory:
+    sessions_dir: ./data/memory/sessions

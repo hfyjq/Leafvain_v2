@@ -26,11 +26,15 @@ load_dotenv()
 from bus.core import init_bus, load_config
 from bus.registry import get_provider, get_channel
 from core.memory.manager import MemoryManager
+from core.prompt_assembler import set_project_root
 
 
 async def main() -> None:
     # 1. Load configuration
     config = load_config(_PROJECT_ROOT / "config.yaml")
+
+    # 1.5 Initialize prompt assembler with project root
+    set_project_root(_PROJECT_ROOT)
 
     # 2. Initialize bus — loads all providers, skills, channels
     init_bus(config)
@@ -49,7 +53,7 @@ async def main() -> None:
     # 5. Get the CLI channel and start
     channel_name = config.get("channel", {}).get("default", "cli_channel")
     channel_run = get_channel(channel_name)
-    await channel_run(provider, memory_manager=memory_manager)
+    await channel_run(provider, memory_manager=memory_manager, config=config)
 
 
 if __name__ == "__main__":
