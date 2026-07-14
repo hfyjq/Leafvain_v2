@@ -3,8 +3,8 @@ name: deepseek
 version: "0.2.0"
 description: "DeepSeek API provider using OpenAI-compatible SDK"
 config:
-  base_url: <BASE_URL>
-  default_model: <DEFAULT_MODEL>
+  base_url: https://api.deepseek.com/v1
+  default_model: deepseek-chat
   context_window: 65536
   supports_function_calling: true
   supports_streaming: true

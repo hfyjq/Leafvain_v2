@@ -55,13 +55,16 @@ def load_config(config_path: str | Path) -> dict:
     return _resolve_env_vars(raw)
 
 
-def init_bus(config: dict) -> SecurityGuard:
+def init_bus(config: dict, **channel_deps) -> SecurityGuard:
     """
     Initialize the module bus:
     1. Create SecurityGuard from config.
     2. Load all providers from providers/.
     3. Load all skills from skills/.
     4. Load all channels from channels/.
+
+    Extra keyword arguments are forwarded to Channel constructors
+    (e.g. ``scheduler=…``, ``session_pool=…``).
 
     Returns the SecurityGuard instance (needed by skills).
 
@@ -103,7 +106,7 @@ def init_bus(config: dict) -> SecurityGuard:
         for entry in sorted(channels_dir.iterdir()):
             if entry.is_dir() and (entry / "manifest.yaml").exists():
                 try:
-                    load_channel(entry)
+                    load_channel(entry, config=config, **channel_deps)
                 except Exception as e:
                     print(f"[bus] WARNING: Failed to load channel '{entry.name}': {e}")
 

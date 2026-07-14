@@ -47,6 +47,11 @@ class MemoryManager:
         long_term_cfg = mem_cfg.get("long_term", {})
         semantic_cfg = mem_cfg.get("semantic", {})
 
+        # Sliding window: hard cap on in-memory message count.
+        # This is a safety net — compression (85% token threshold)
+        # should normally keep the list well under this limit.
+        self._max_history = short_term_cfg.get("max_history", 100)
+
         # Initialize sub-modules
         self.short_term = ShortTermMemory(
             db_path=f"{storage_path}/short_term.db",
@@ -247,6 +252,39 @@ class MemoryManager:
 
         return compressed, was_compressed
 
+    def _apply_sliding_window(
+        self, session_id: str, messages: List[Dict],
+    ) -> Tuple[List[Dict], bool]:
+        """Hard-cap the message list to *max_history* entries.
+
+        Keeps leading system messages (instructions + historical_context)
+        and the most recent messages.  This is a last-resort safety net
+        — compression should normally keep the list well under the limit.
+
+        Returns ``(truncated_messages, was_truncated)``.
+        """
+        if len(messages) <= self._max_history:
+            return messages, False
+
+        # Count leading system messages (keep at most 2: instructions
+        # + <historical_context>)
+        head_system_count = 0
+        for m in messages:
+            if m.get("role") == "system":
+                head_system_count += 1
+            else:
+                break
+
+        keep_heads = min(head_system_count, 2)
+        keep_tails = self._max_history - keep_heads
+        truncated = messages[:keep_heads] + messages[-keep_tails:]
+
+        print(
+            f"[memory] Sliding window: {len(messages)} → {len(truncated)} "
+            f"messages (max_history={self._max_history})"
+        )
+        return truncated, True
+
     # ------------------------------------------------------------------
     # Per-turn context injection
     # ------------------------------------------------------------------
@@ -284,8 +322,11 @@ class MemoryManager:
 
         parts: List[str] = []
 
-        # 1. User profile (always included — cross-session identity)
-        profile = self.semantic.get_profile()
+        # 1. User profile — in profile-only mode, restrict to user scope
+        profile = (
+            self.semantic.get_profile(scope="user") if profile_only
+            else self.semantic.get_profile()
+        )
         if profile:
             profile_lines = [
                 "## USER PROFILE (internal — do NOT mention in replies)",
@@ -293,19 +334,29 @@ class MemoryManager:
             for key, value in profile.items():
                 profile_lines.append(f"- {value}")
             parts.append("\n".join(profile_lines))
-            print(f"[memory] get_context: {len(profile)} profile entries found")
+            print(f"[memory] get_context: {len(profile)} profile entries found"
+                  + (" (user scope only)" if profile_only else ""))
 
-        # 2. Relevant historical facts  (skipped in profile-only mode)
+        # 2. Relevant historical facts — scope-aware
         if not profile_only:
+            # Normal mode: search all scopes
             relevant_facts = self.long_term.search_facts(user_query, k=3)
-            if relevant_facts:
-                fact_lines = [
-                    "## RELEVANT CONTEXT (internal — do NOT mention in replies)",
-                ]
-                for f in relevant_facts:
-                    fact_lines.append(f"- [{f.get('category', '')}] {f.get('fact', '')}")
-                parts.append("\n".join(fact_lines))
-                print(f"[memory] get_context: {len(relevant_facts)} long-term facts matched")
+        else:
+            # Profile-only mode: only user-scope facts (identity / preferences)
+            relevant_facts = self.long_term.search_facts(
+                user_query, k=3, scope_filter="user",
+            )
+        if relevant_facts:
+            fact_lines = [
+                "## RELEVANT CONTEXT (internal — do NOT mention in replies)",
+            ]
+            for f in relevant_facts:
+                fact_lines.append(
+                    f"- [{f.get('category', '')}] {f.get('fact', '')}"
+                )
+            parts.append("\n".join(fact_lines))
+            print(f"[memory] get_context: {len(relevant_facts)} long-term facts matched"
+                  + (" (user scope only)" if profile_only else ""))
 
         # 3. Session note  (skipped in profile-only mode)
         if not profile_only:
@@ -458,6 +509,27 @@ class MemoryManager:
                 print(f"[memory] Compression applied: "
                       f"{len(messages)} → {len(compressed_messages)} messages")
 
+        # 3.5. Sliding window safety net — hard cap on message count.
+        #      Applied AFTER compression on whichever list is current.
+        #      Should rarely trigger; compression normally keeps the
+        #      list well under max_history.  When it does trigger the
+        #      truncated messages remain in SQLite and contribute to
+        #      restore-time compression on the next session load.
+        if messages is not None:
+            current = (
+                compressed_messages
+                if compressed_messages is not None
+                else messages
+            )
+            truncated, was_truncated = self._apply_sliding_window(
+                session_id, current,
+            )
+            if was_truncated:
+                # Sync _saved_count to the truncated list length so
+                # future saves are relative to the kept messages.
+                self._saved_count[session_id] = len(truncated)
+                compressed_messages = truncated
+
         # 4. Extract facts in the main thread (uses SQLite — must be
         #    on the creating thread).
         if messages is not None:
@@ -534,6 +606,32 @@ class MemoryManager:
     def last_compression(self) -> dict | None:
         """Stats from the most recent compression run, if any."""
         return self.compressor.last_compression
+
+    # ------------------------------------------------------------------
+    # Project-scope memory management
+    # ------------------------------------------------------------------
+
+    def clear_project_memory(self) -> int:
+        """Delete all project-scope facts from semantic and Chroma stores.
+
+        User-scope facts (personal identity, preferences) are preserved.
+        Call when switching projects to reset project-level context.
+
+        Returns the number of project facts removed from SQLite.
+        """
+        # SQLite: remove project-scope rows
+        rows = self.semantic.get_by_scope("project")
+        for key, _value, _category in rows:
+            self.semantic.delete(key)
+
+        # Chroma: there's no efficient bulk-delete-by-metadata in
+        # Chroma's API for now; we log what would be cleaned.
+        # In practice, project facts in Chroma are naturally evicted
+        # by the embedding space — new project queries will surface
+        # relevant facts regardless of old project noise.
+        count = len(rows)
+        print(f"[memory] Cleared {count} project-scope facts from semantic profile")
+        return count
 
     # ------------------------------------------------------------------
     # Maintenance

@@ -163,6 +163,14 @@ class SessionMemory:
         """Return ``True`` if a ``.md`` file exists for this session."""
         return self.get_note_path(session_id).is_file()
 
+    @staticmethod
+    def _sanitize_filename(session_id: str) -> str:
+        """Replace characters that are illegal in filenames (Windows)."""
+        for char in ':<>"/\\|?*':
+            session_id = session_id.replace(char, "_")
+        return session_id
+
     def get_note_path(self, session_id: str) -> Path:
         """Return the filesystem path to the session note ``.md`` file."""
-        return self._sessions_dir / f"{session_id}.md"
+        safe = self._sanitize_filename(session_id)
+        return self._sessions_dir / f"{safe}.md"

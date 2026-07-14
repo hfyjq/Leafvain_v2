@@ -93,13 +93,13 @@ def get_provider(name: str) -> Any:
     return _registry["providers"][name]
 
 
-def register_channel(name: str, handler: Callable) -> None:
-    """Register a channel's async run function."""
+def register_channel(name: str, handler) -> None:
+    """Register a Channel instance."""
     _registry["channels"][name] = handler
 
 
-def get_channel(name: str) -> Callable:
-    """Return a channel's run function by name. Raises KeyError if not found."""
+def get_channel(name: str):
+    """Return a Channel instance by name. Raises KeyError if not found."""
     if name not in _registry["channels"]:
         raise KeyError(f"Channel '{name}' not registered. Available: {list(_registry['channels'].keys())}")
     return _registry["channels"][name]

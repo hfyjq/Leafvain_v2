@@ -54,7 +54,7 @@ class LongTermMemory:
         Store extracted facts in the conversation_facts collection.
 
         Each fact dict should have: ``fact`` (str), ``category`` (str),
-        and optionally ``confidence`` (float).
+        ``scope`` (str: "user" | "project"), and optionally ``confidence`` (float).
 
         Returns the number of facts added.
         """
@@ -75,6 +75,7 @@ class LongTermMemory:
             metadatas.append({
                 "category": f.get("category", "general"),
                 "confidence": f.get("confidence", 1.0),
+                "scope": f.get("scope", "project"),
             })
 
         if ids:
@@ -83,14 +84,24 @@ class LongTermMemory:
         return len(ids)
 
     def search_facts(
-        self, query: str, k: int = 3
+        self, query: str, k: int = 3, scope_filter: str | None = None,
     ) -> List[Dict]:
         """
         Search conversation facts by semantic similarity.
 
-        Returns list of {fact, category, confidence, distance}.
+        If *scope_filter* is given (``"user"`` or ``"project"``),
+        only facts with that scope are returned.
+
+        Returns list of {fact, category, scope, confidence, distance}.
         """
-        results = self._facts.query(query_texts=[query], n_results=k)
+        where = None
+        if scope_filter:
+            where = {"scope": scope_filter}
+
+        results = self._facts.query(
+            query_texts=[query], n_results=k,
+            where=where,
+        )
         if not results or not results["ids"] or not results["ids"][0]:
             return []
 
@@ -105,6 +116,7 @@ class LongTermMemory:
                 "id": ids_list[i],
                 "fact": docs_list[i] if docs_list else "",
                 "category": meta_list[i].get("category", "") if meta_list else "",
+                "scope": meta_list[i].get("scope", "project") if meta_list else "project",
                 "confidence": meta_list[i].get("confidence", 1.0) if meta_list else 1.0,
                 "distance": dist_list[i] if dist_list else 0.0,
             })

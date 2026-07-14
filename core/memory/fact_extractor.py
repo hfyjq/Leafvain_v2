@@ -13,6 +13,20 @@ from typing import Dict, List, Optional
 # Mem0-style fact extraction prompt — covers 7 information categories
 # ------------------------------------------------------------------
 
+# Map the 7 fact categories to two scopes.
+# - "user" scope:  who the user IS (persists across projects)
+# - "project" scope: what they're WORKING ON (session/project-bound)
+CATEGORY_SCOPE = {
+    "personal": "user",
+    "preference": "user",
+    "project": "project",
+    "constraint": "project",
+    "decision": "project",
+    "knowledge": "project",
+    "relationship": "project",
+}
+
+
 FACT_EXTRACTION_PROMPT = """You are a precise fact extraction system. Your job is to extract specific, concrete facts from the conversation.
 
 ## Categories
@@ -103,6 +117,9 @@ class FactExtractor:
             if confidence < self.MIN_CONFIDENCE:
                 continue
 
+            # Assign scope based on category
+            scope = CATEGORY_SCOPE.get(category, "project")
+
             # Search for similar existing facts
             existing = self._long_term.search_facts(fact_text, k=1)
             if existing and existing[0].get("distance", 1.0) < self.DEDUP_DISTANCE:
@@ -112,17 +129,19 @@ class FactExtractor:
                     self._long_term.delete_fact(old_id)
                 # Fall through to re-add
 
+            fact["scope"] = scope
             new_facts.append(fact)
 
-        # 4. Store new/updated facts in Chroma
+        # 4. Store new/updated facts in Chroma (with scope in metadata)
         if new_facts:
             self._long_term.add_facts(new_facts)
 
-        # 5. Sync to semantic profile (KV store)
+        # 5. Sync to semantic profile (KV store, with scope)
         for fact in new_facts:
             category = fact.get("category", "general")
             fact_text = fact.get("fact", "")
             confidence = fact.get("confidence", 1.0)
+            scope = fact.get("scope", "project")
 
             # Sync ALL categories to semantic profile (KV store)
             # so get_context() can always find them regardless of category
@@ -138,6 +157,7 @@ class FactExtractor:
                     category=category,
                     confidence=confidence,
                     source_turn=self._turn_counter,
+                    scope=scope,
                 )
 
         return new_facts

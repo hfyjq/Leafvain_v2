@@ -1,38 +1,38 @@
 """
-CLI channel: interactive input loop with persistent memory.
+CLI channel: interactive input loop implementing the Channel ABC.
 
-Session state (messages, chunks, memory) persists across turns AND
-across process restarts via the MemoryManager.
+Session state is managed by the Pipeline (PreProcess → AgentLoop →
+PostProcess).  The CLI channel only handles I/O: read input, display
+output, show stats.
+
+v0.7.0: uses ``CLIMessageConverter`` to translate between raw ``str``
+input and ``MessageChain``.
 """
+
+from __future__ import annotations
 
 import os
 import sys
-from typing import Dict, List
+from typing import Any
 
-from core.agent_loop import agent_loop
-from core.prompt_assembler import assemble_system_prompt
+from channels.base import (
+    Channel,
+    ChannelMetadata,
+    Message,
+    MessageEvent,
+    MessageSession,
+    MessageType,
+)
+from channels.converter import MessageConverter
+from channels.message import MessageChain
 
 
 # ------------------------------------------------------------------
 # Input — plain ``input()`` with post-turn console drain on Windows
 # ------------------------------------------------------------------
-#
-# Multi-line paste (Ctrl+V) into the Windows console is fundamentally
-# unreliable because ``input()`` uses C runtime buffered I/O while
-# ``msvcrt`` reads from a separate console API layer.  Rather than
-# fighting this, we accept single-line ``input()`` and drain any
-# residual characters after each turn so they don't leak into the
-# next one.  For code / multi-line content, save it as a file and use
-# ``parse_txt`` / ``parse_pdf``.
-#
-
 
 def _drain_console() -> None:
-    """Discard any lingering console-input characters between turns.
-
-    Called after each agent response so that paste remnants from the
-    *previous* ``input()`` call don't become the *next* turn's input.
-    """
+    """Discard any lingering console-input characters between turns."""
     if os.name != "nt":
         return
     import msvcrt
@@ -41,7 +41,7 @@ def _drain_console() -> None:
     while msvcrt.kbhit():
         msvcrt.getwch()
         count += 1
-        if count > 50_000:          # safety valve
+        if count > 50_000:
             break
 
     if count > 10:
@@ -62,12 +62,13 @@ WELCOME_BANNER = r"""
 ║    搜索 XXX 相关的内容                                      ║
 ║    总结 data/workspaces/report.pdf                        ║
 ║                                                          ║
-║  Exit:  exit / quit / Ctrl+C                             ║
+║  Commands:  /clear  /compact  /exit  /quit               ║
 ╚══════════════════════════════════════════════════════════╝
 """
 
+
 # ------------------------------------------------------------------
-# Context usage display helpers
+# Context-usage display helpers
 # ------------------------------------------------------------------
 
 _BAR_WIDTH = 20
@@ -76,7 +77,7 @@ _HIGH_PCT = 85
 
 
 def _format_tokens(n: int) -> str:
-    """Pretty-print token count (e.g. 15420 -> '15.4K')."""
+    """Pretty-print token count (e.g. 15420 → '15.4K')."""
     if n >= 1_000_000:
         return f"{n / 1_000_000:.1f}M"
     if n >= 1_000:
@@ -100,12 +101,12 @@ def _render_usage_bar(pct: float, threshold_pct: float) -> str:
         return bar
 
 
-def _display_context_usage(memory_manager, messages) -> None:
+def _display_context_usage(pool, session_key, messages) -> None:
     """Print a one-line context-usage summary after each turn."""
-    if memory_manager is None:
+    if pool is None:
         return
 
-    usage = memory_manager.get_context_usage(messages)
+    usage = pool.get_context_usage(session_key, messages)
     pct = usage["percentage"]
     est = usage["estimated_tokens"]
     win = usage["context_window"]
@@ -119,9 +120,8 @@ def _display_context_usage(memory_manager, messages) -> None:
     )
 
 
-def _display_compression(memory_manager) -> None:
+def _display_compression(stats) -> None:
     """Print a one-line compression summary."""
-    stats = memory_manager.last_compression
     if stats is None:
         return
 
@@ -136,231 +136,151 @@ def _display_compression(memory_manager) -> None:
     )
 
 
-async def run(provider, memory_manager=None, config: dict | None = None) -> None:
+# ------------------------------------------------------------------
+# CLIMessageConverter
+# ------------------------------------------------------------------
+
+class CLIMessageConverter(MessageConverter):
+    """CLI converter: ``str`` ↔ ``MessageChain``.
+
+    The CLI has the simplest possible message format — raw text from
+    ``input()``.  ``to_internal`` wraps it in a ``Plain`` component;
+    ``to_platform`` extracts the text back out.
     """
-    Start the interactive CLI loop with persistent session state.
 
-    Args:
-        provider: The active LLM provider client instance.
-        memory_manager: MemoryManager instance (optional).
-        config: Full application config dict (optional).
+    def to_internal(self, platform_message: str) -> MessageChain:
+        """*platform_message* is the raw text from ``input()``."""
+        text = platform_message.strip() if isinstance(platform_message, str) else str(platform_message)
+        return MessageChain.from_text(text)
+
+    def to_platform(self, message_chain: MessageChain, **kwargs: Any) -> str:
+        """Return the plain-text content (for printing to stdout)."""
+        return message_chain.content
+
+
+# ------------------------------------------------------------------
+# CLIChannel
+# ------------------------------------------------------------------
+
+class CLIChannel(Channel):
+    """Interactive command-line channel.
+
+    Directly awaits the pipeline scheduler for each turn (unlike IM
+    channels which use the event-handler pattern).  This keeps the
+    synchronous-readline CLI simple.
     """
-    print(WELCOME_BANNER)
 
-    # Extract agent-level settings from config
-    tool_result_max_chars = 2000
-    if config is not None:
-        tool_result_max_chars = config.get("tool_result_max_chars", 2000)
+    def __init__(
+        self,
+        config: dict | None = None,
+        scheduler=None,
+        session_pool=None,
+    ) -> None:
+        super().__init__(config)
+        self._converter = CLIMessageConverter()
+        self._scheduler = scheduler
+        self._pool = session_pool
+        self._running = False
 
-    # ------------------------------------------------------------------
-    # Session state — persisted across turns and restarts
-    # ------------------------------------------------------------------
-    messages: List[Dict] | None = None
-    session_chunks: List[Dict] = []
-    session_id: str | None = None
+    # ---- Channel ABC ----
 
-    # If memory manager is available, restore previous session
-    if memory_manager is not None:
-        session_id, messages = memory_manager.load_session()
-        if messages:
-            # Ensure SYSTEM_PROMPT is present in restored messages.
-            # Compressed sessions may only have <historical_context>.
-            if messages[0].get("role") == "system":
-                existing = messages[0].get("content", "")
-                if "<system_instructions>" not in existing:
-                    messages[0]["content"] = assemble_system_prompt() + "\n\n" + existing
+    def meta(self) -> ChannelMetadata:
+        return ChannelMetadata(
+            name="cli_channel",
+            description="Interactive CLI for document analysis",
+            platform_type="cli",
+        )
 
-            # Show a clear session-restore indicator with context stats
-            usage = memory_manager.get_context_usage(messages)
-            print(
-                f"\n  📋 Restored session: {session_id}\n"
-                f"     {len(messages)} messages  |  "
-                f"{_format_tokens(usage['estimated_tokens'])}/"
-                f"{_format_tokens(usage['context_window'])} tokens  "
-                f"({usage['percentage']}%)"
-            )
-            if memory_manager.session_memory.exists(session_id):
+    async def run(self) -> None:
+        print(WELCOME_BANNER)
+        self._running = True
+
+        session = MessageSession("cli", MessageType.PRIVATE, "local")
+        session_key = str(session)
+
+        # Restore previous session on startup
+        if self._pool is not None:
+            sid, msgs = self._pool.get_or_create(session_key)
+            usage = self._pool.get_context_usage(session_key, msgs)
+            if msgs:
                 print(
-                    f"  📝 session note loaded "
-                    f"({memory_manager.session_memory.get_note_path(session_id)})"
-                )
-            print(f"  💡 Coming soon: /clear to start a fresh session")
-        else:
-            print(f"\n  🆕 New session: {session_id}")
-
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
-    while True:
-        # Flush any pending background-thread output BEFORE the prompt
-        # so it never interleaves with the You> input line.
-        if memory_manager is not None:
-            memory_manager.flush_bg_status()
-
-        try:
-            user_input = input("\nYou> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye.")
-            break
-
-        if user_input.lower() in ("exit", "quit"):
-            print("Goodbye.")
-            break
-
-        # --- /clear — hard reset, discard all context ---
-        if user_input.strip().lower() == "/clear":
-            old_msg_count = len(messages) if messages else 0
-            old_usage = ""
-            if memory_manager is not None and messages:
-                usage = memory_manager.get_context_usage(messages)
-                old_usage = (
-                    f"  {_format_tokens(usage['estimated_tokens'])}/"
-                    f"{_format_tokens(usage['context_window'])} tokens "
+                    f"\n  📋 Restored session: {sid}\n"
+                    f"     {len(msgs)} messages  |  "
+                    f"{_format_tokens(usage['estimated_tokens'])}/"
+                    f"{_format_tokens(usage['context_window'])} tokens  "
                     f"({usage['percentage']}%)"
                 )
-
-            session_chunks = []
-            if memory_manager is not None:
-                session_id, messages = memory_manager.new_session()
-                print(
-                    f"\n  🆕 /clear — session reset\n"
-                    f"     Cleared: {old_msg_count} messages"
-                    + (f", {old_usage}" if old_usage else "") + "\n"
-                    f"     New session: {session_id}\n"
-                    f"     Memory (profile + long-term facts) preserved."
-                )
             else:
-                messages = None
-                print(f"\n  🆕 /clear — session reset ({old_msg_count} messages cleared)")
-            continue
+                print(f"\n  🆕 New session: {sid}")
 
-        # --- /compact — soft compress, replace old turns with summary ---
-        if user_input.strip().lower() == "/compact":
-            if memory_manager is None or not session_id or not messages:
-                print("\n  ⚠ /compact: no active session to compact")
+        while self._running:
+            # Flush any pending background-thread output
+            if self._pool is not None:
+                self._pool._mgr.flush_bg_status()
+
+            try:
+                user_input = input("\nYou> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nGoodbye.")
+                break
+
+            if user_input.lower() in ("exit", "quit"):
+                print("Goodbye.")
+                break
+
+            if not user_input:
                 continue
 
-            old_count = len(messages)
-            old_usage = memory_manager.get_context_usage(messages)
-
-            compressed, was_compressed = memory_manager.compact(
-                session_id, messages,
+            # Build message + event (via converter)
+            chain = self._converter.to_internal(user_input)
+            message = Message(
+                sender_id="cli_user",
+                sender_name="User",
+                message_chain=chain,
+                message_type=MessageType.PRIVATE,
+                session=session,
             )
+            event = self.commit_event(message)
 
-            if was_compressed:
-                messages = compressed
-                # Merge system prompt back in if compression replaced it
-                if messages and messages[0].get("role") == "system":
-                    existing = messages[0].get("content", "")
-                    if "<system_instructions>" not in existing:
-                        messages[0]["content"] = (
-                            assemble_system_prompt() + "\n\n" + existing
-                        )
-                new_usage = memory_manager.get_context_usage(messages)
-                print(
-                    f"\n  📦 /compact — context compressed\n"
-                    f"     Messages: {old_count} → {len(messages)} "
-                    f"({old_count - len(messages)} removed)\n"
-                    f"     Tokens: "
-                    f"{_format_tokens(old_usage['estimated_tokens'])} → "
-                    f"{_format_tokens(new_usage['estimated_tokens'])} "
-                    f"({old_usage['percentage']}% → {new_usage['percentage']}%)"
-                )
-                _display_compression(memory_manager)
-            else:
-                usage = memory_manager.get_context_usage(messages)
-                print(
-                    f"\n  ℹ /compact: not enough turns to compress "
-                    f"({len(messages)} messages, "
-                    f"{usage['percentage']}% context used)"
-                )
-            continue
+            # Run pipeline (blocking — CLI needs inline response)
+            if self._scheduler is not None:
+                response = await self._scheduler.execute(event)
+                # Display response
+                print(f"\nAgent: {response}")
 
-        if not user_input:
-            continue
+                # Display stats
+                usage = ctx_usage = None
+                compression = None
+                if event.extras.get("response") == response:
+                    # Pipeline set extras — read stats from there
+                    pass
 
-        print("\nAgent is thinking...")
+                # Show context bar + compression
+                if self._pool is not None and response:
+                    sid, msgs = self._pool.get_or_create(session_key)
+                    _display_context_usage(self._pool, session_key, msgs)
+                    _display_compression(self._pool.last_compression)
 
-        try:
-            # Build memory context for this turn
-            memory_ctx = ""
-            if memory_manager is not None and session_id:
-                memory_ctx = memory_manager.get_context(
-                    session_id, user_input, messages=messages,
-                )
-
-            response, messages, session_chunks, tokens_used = agent_loop(
-                user_input,
-                provider,
-                messages=messages,
-                session_chunks=session_chunks,
-                memory_context=memory_ctx,
-                tool_result_max_chars=tool_result_max_chars,
-            )
-
-            print(f"\nAgent: {response}")
-
-            # Record turn in memory (persist messages + check compression + extract facts)
-            if memory_manager is not None and session_id:
-                # Build message dicts for persistence
-                user_msg = {"role": "user", "content": user_input}
-                assistant_msg = {"role": "assistant", "content": response}
-
-                compressed = memory_manager.record_turn(
-                    session_id=session_id,
-                    user_message=user_msg,
-                    assistant_message=assistant_msg,
-                    token_count=tokens_used,
-                    messages=messages,
-                )
-
-                # If compression happened, use the compressed messages list
-                if compressed is not None:
-                    messages = compressed
-                    # Merge SYSTEM_PROMPT into the compressed system message.
-                    # After compression, messages[0] is a system message with
-                    # <historical_context> — we must prepend the core
-                    # behavioural instructions so the agent doesn't lose them.
-                    if messages and messages[0].get("role") == "system":
-                        existing = messages[0].get("content", "")
-                        if "<system_instructions>" not in existing:
-                            messages[0]["content"] = (
-                                assemble_system_prompt() + "\n\n" + existing
-                            )
-                    elif messages:
-                        messages.insert(0, {
-                            "role": "system",
-                            "content": assemble_system_prompt(),
-                        })
-
-                    _display_compression(memory_manager)
-
-                # Show context usage after each turn
-                if memory_manager is not None and messages:
-                    _display_context_usage(memory_manager, messages)
-
-                # Show session note status
-                if (
-                    memory_manager is not None
-                    and session_id
-                    and memory_manager.session_memory.exists(session_id)
-                ):
-                    note_path = memory_manager.session_memory.get_note_path(
-                        session_id
-                    )
+                    # Show session note path
                     try:
-                        note_size = note_path.stat().st_size
-                        size_str = (
-                            f"{note_size / 1024:.1f}KB"
-                            if note_size >= 1024
-                            else f"{note_size}B"
-                        )
-                        print(f"  📝 session note: {size_str}  ({note_path})")
+                        mgr = self._pool._mgr
+                        if mgr.session_memory.exists(sid):
+                            note_path = mgr.session_memory.get_note_path(sid)
+                            note_size = note_path.stat().st_size
+                            size_str = (
+                                f"{note_size / 1024:.1f}KB"
+                                if note_size >= 1024
+                                else f"{note_size}B"
+                            )
+                            print(f"  📝 session note: {size_str}  ({note_path})")
                     except OSError:
                         pass
 
-                # Drain console residual after each turn
+                _drain_console()
+            else:
+                # No scheduler — echo mode for testing
+                print(f"\n[echo] {user_input}")
                 _drain_console()
 
-        except Exception as e:
-            print(f"\n[Error] {type(e).__name__}: {e}")
+    async def terminate(self) -> None:
+        self._running = False

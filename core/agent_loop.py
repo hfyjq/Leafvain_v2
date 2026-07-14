@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 from bus.registry import get_tool_handler, get_tool_schemas
+from channels.message import MessageChain
 from core.prompt_assembler import assemble_system_prompt
 from core.retriever import BM25Retriever
 from core.summarizer import iterative_summarize
@@ -29,7 +30,7 @@ SessionState = Tuple[str, List[Dict], List[Dict], int]
 
 
 def agent_loop(
-    user_message: str,
+    user_message: str | MessageChain,
     provider,  # Provider client with .chat(messages, tools) method
     messages: List[Dict] | None = None,
     session_chunks: List[Dict] | None = None,
@@ -41,7 +42,9 @@ def agent_loop(
     Process one user message with tool-calling support.
 
     Args:
-        user_message: The user's natural-language input.
+        user_message: The user's input — ``str`` for plain text or
+            ``MessageChain`` for rich content.  Passed to the LLM as
+            plain text (chain.content for MessageChain).
         provider: LLM provider client instance.
         messages: Existing conversation messages (persisted across turns).
         session_chunks: Previously parsed chunks (persisted across turns).
@@ -50,6 +53,10 @@ def agent_loop(
     Returns:
         (response_text, updated_messages, updated_session_chunks, tokens_used)
     """
+    # Normalise to plain text for the LLM
+    user_text: str = (
+        user_message if isinstance(user_message, str) else user_message.content
+    )
     # ------------------------------------------------------------------
     # Per-session state (IN-MEMORY, never in LLM context)
     # ------------------------------------------------------------------
@@ -127,7 +134,7 @@ def agent_loop(
             "content": "[This is a continuous conversation. Reply directly — no greetings, no recaps.]",
         })
 
-    messages.append({"role": "user", "content": user_message})
+    messages.append({"role": "user", "content": user_text})
 
     tools = get_tool_schemas()
 
